@@ -16,6 +16,7 @@ class ThreeLayerConvNet(object):
     consisting of N images, each with height H and width W and with C input
     channels.
     """
+    
 
     def __init__(self, input_dim=(3, 32, 32), num_filters=32, filter_size=7,
                  hidden_dim=100, num_classes=10, weight_scale=1e-3, reg=0.0,
@@ -38,7 +39,10 @@ class ThreeLayerConvNet(object):
         self.params = {}
         self.reg = reg
         self.dtype = dtype
-
+        self.bn_param1 = {}
+        self.bn_param2 = {}
+        self.bn_params = {}
+        
         ############################################################################
         # TODO: Initialize weights and biases for the three-layer convolutional    #
         # network. Weights should be initialized from a Gaussian with standard     #
@@ -63,17 +67,29 @@ class ThreeLayerConvNet(object):
         self.params['b3'] = np.zeros(num_classes)
         
         if (use_batchnorm):
-            self.params['gamma1'] = np.ones(C)
-            self.params['beta1'] = np.zeros(C)
-            self.params['gamma2'] = np.ones(input_dim_fc)
-            self.params['beta2'] = np.zeros(input_dim_fc)
+            
+            self.bn_param1 = {'mode': 'train',
+                         'running_mean': np.zeros(num_filters),
+                         'running_var': np.zeros(num_filters)}
+            
+            self.bn_param2 = {'mode': 'train',
+                         'running_mean': np.zeros(hidden_dim),
+                         'running_var': np.zeros(hidden_dim)}
+                       
+            self.bn_params['gamma1'] = np.ones(num_filters)
+            self.bn_params['beta1'] = np.zeros(num_filters)
+            self.bn_params['gamma2'] = np.ones(hidden_dim)
+            self.bn_params['beta2'] = np.zeros(hidden_dim)
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
 
+        self.bn_param = []
+                
         for k, v in self.params.items():
             self.params[k] = v.astype(dtype)
 
+    
 
     def loss(self, X, y=None):
         """
@@ -81,16 +97,16 @@ class ThreeLayerConvNet(object):
 
         Input / output: Same API as TwoLayerNet in fc_net.py.
         """
-        
-        mode = 'test' if y is None else 'train'
-        if self.use_batchnorm:
-            bn_param['mode'] = mode
+        #mode = 'test' if y is None else 'train'
+        #if self.use_batchnorm:
+        #    self.bn_param = {'mode': 'train'}
+            
         W1, b1 = self.params['W1'], self.params['b1']
         W2, b2 = self.params['W2'], self.params['b2']
         W3, b3 = self.params['W3'], self.params['b3']
         if (self.use_batchnorm):
-            gamma1, beta1 = self.params['gamma1'], self.params['beta1']
-            gamma2, beta2 = self.params['gamma2'], self.params['beta2']
+            gamma1, beta1 = self.bn_params['gamma1'], self.bn_params['beta1']
+            gamma2, beta2 = self.bn_params['gamma2'], self.bn_params['beta2']
 
         # pass conv_param to the forward pass for the convolutional layer
         filter_size = W1.shape[2]
@@ -105,10 +121,13 @@ class ThreeLayerConvNet(object):
         # computing the class scores for X and storing them in the scores          #
         # variable.                                                                #
         ############################################################################
-        
+        N, F, Hp, Wp = 0,0,0,0
         if (self.use_batchnorm):
-            out1, cache1 = conv_bn_relu_pool_forward(X, w1, b1, gamma, beta, conv_param, bn_param, pool_param)
-            out2, cache2 = affine_bn_relu_forward(out1,gamma2,beta2, W2, b2, bn_param)
+            
+            out1, cache1 = self.conv_bn_relu_pool_forward(X, W1, b1, gamma1, beta1, conv_param, self.bn_param1, pool_param)
+            N, F, Hp, Wp = out1.shape
+            out1 = out1.reshape((N, F * Hp * Wp))
+            out2, cache2 = self.affine_bn_relu_forward(out1,gamma2,beta2, W2, b2, self.bn_param2)
         
         else:
             out1, cache1 = conv_relu_pool_forward(X, W1, b1, conv_param, pool_param)
@@ -137,12 +156,27 @@ class ThreeLayerConvNet(object):
         dx, dw3, db3 = affine_backward(dout, cache3)
         grads['W3'] = dw3
         grads['b3'] = db3
-        dx, dw2, db2 = affine_relu_backward(dx, cache2)
-        grads['W2'] = dw2
-        grads['b2'] = db2   
-        dx, dw1, db1 = conv_relu_pool_backward(dx, cache1)
-        grads['W1'] = dw1
-        grads['b1'] = db1
+        
+        if (self.use_batchnorm):
+            dx, dw2, db2, dgamma2, dbeta2 = self.affine_bn_relu_backward(dx, cache2)
+            grads['W2'] = dw2
+            grads['b2'] = db2
+            grads['gamma2'] = dgamma2
+            grads['dbeta2'] = dbeta2
+
+            dx2 = dx.reshape(N, F, Hp, Wp)
+            dx, dw1, db1, dgamma1, dbeta1 = self.conv_bn_relu_pool_backward(dx2, cache1)
+            grads['W1'] = dw1
+            grads['b1'] = db1
+            grads['dgamma1'] = dgamma1
+            grads['dbeta1'] = dbeta1
+        else:
+            dx, dw2, db2 = affine_relu_backward(dx, cache2)
+            grads['W2'] = dw2
+            grads['b2'] = db2
+            dx, dw1, db1 = conv_relu_pool_backward(dx, cache1)
+            grads['W1'] = dw1
+            grads['b1'] = db1
         
          #regularitation
         grads['W3'] += self.reg * W3    
@@ -155,7 +189,9 @@ class ThreeLayerConvNet(object):
 
         return loss, grads
     
-    def conv_bn_relu_pool_forward(x, w, b, gamma, beta, conv_param, bn_param, pool_param):
+
+    def conv_bn_relu_pool_forward(self,x, w, b, gamma, beta, conv_param, bn_param, pool_param):
+        
         a, conv_cache = conv_forward_fast(x, w, b, conv_param)
         an, bn_cache = spatial_batchnorm_forward(a, gamma, beta, bn_param)
         rf, relu_cache = relu_forward(an)
@@ -163,10 +199,24 @@ class ThreeLayerConvNet(object):
         cache = (conv_cache, bn_cache, relu_cache, pool_cache)
         return out, cache
     
-    def affine_bn_relu_forward(x,gamma,beta, w, b, bn_param):
+    def affine_bn_relu_forward(self,x,gamma,beta, w, b, bn_param):
         a, fc_cache = affine_forward(x, w, b)
         b, bn_cache = batchnorm_forward(a, gamma, beta, bn_param)
         out, relu_cache = relu_forward(b)
         cache = (fc_cache, bn_cache, relu_cache)
         return out, cache
-        
+    
+    def affine_bn_relu_backward(self,x,cache):
+        fc_cache, bn_cache, relu_cache = cache
+        da = relu_backward(x, relu_cache)
+        dx, dgamma, dbeta = batchnorm_backward(da, bn_cache)
+        dx, dw, db = affine_backward(dx, fc_cache)
+        return dx, dw, db, dgamma, dbeta
+    
+    def conv_bn_relu_pool_backward(self,dout, cache):
+        conv_cache, bn_cache, relu_cache, pool_cache = cache
+        ds = max_pool_backward_fast(dout, pool_cache)
+        da = relu_backward(ds, relu_cache)
+        dn, dgamma, dbeta = spatial_batchnorm_backward(da, bn_cache)
+        dx, dw, db = conv_backward_fast(dn, conv_cache)
+        return dx, dw, db, dgamma, dbeta
